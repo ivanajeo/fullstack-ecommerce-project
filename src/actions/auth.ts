@@ -8,7 +8,7 @@ import type { User, Session } from "@prisma/client";
 import { cookies } from "next/headers";
 import { cache } from "react";
 
-export function generateSessionToken(): string {
+export async function generateSessionToken(): Promise<string> {
 	const bytes = new Uint8Array(20);
 	crypto.getRandomValues(bytes);
 	const token = encodeBase32LowerCaseNoPadding(bytes);
@@ -103,3 +103,86 @@ export const getCurrentSession = cache(async (): Promise<SessionValidationResult
 	const result = await validateSessionToken(token);
 	return result;
 });
+
+
+// User register, login, logout
+export const hashPassword = async(password: string) => {
+	return encodeHexLowerCase(sha256(new TextEncoder().encode(password)));
+}
+
+export const verifyPassword = async(password: string, hash: string) => {
+	const passwordHash = await hashPassword(password);
+	return passwordHash === hash;
+}
+
+export const registerUser = async(email: string, password: string) => {
+	const passwordHash = await hashPassword(password);
+	try {
+		const user = await prisma.user.create({
+			data: {
+				email,
+				passwordHash,
+			}
+		})
+
+		const safeUser = {
+			...user,
+			passwordHash: undefined
+		}
+
+		return {
+			user: safeUser,
+			error: null,
+		}
+	} catch(e) {
+		return {
+			user: null,
+			error: "Failed to register user"
+		}
+	}
+}
+
+export const loginUser = async(email: string, password: string) => {
+	const user = await prisma.user.findUnique({
+		where: {
+			email: email,
+		}
+	})
+
+	if (!user) {
+		return {
+			user: null,
+			error: "User not found"
+		}
+	}
+	
+	const passwordValid = await verifyPassword(password, user.passwordHash);
+
+	if (!passwordValid) {
+		return {
+			user: null,
+			error: "Invalid password"
+		}
+	}
+
+	const token = await generateSessionToken();
+	const session = await createSession(token, user.id);
+	await setSessionTokenCookie(token, session.expiresAt);
+
+	const safeUser = {
+			...user,
+			passwordHash: undefined,
+		}
+	return {
+		user: safeUser,
+		error: null
+	}
+}
+
+export const logoutUser = async() => {
+	const session = await getCurrentSession();
+	if(session.session?.id) {
+		await invalidateSession(session.session.id)
+	}
+	await deleteSessionTokenCookie();
+}
